@@ -148,6 +148,8 @@ var defaultSaveOperation;
 var gSendOperationInProgress;
 var gSaveOperationInProgress;
 var gCloseWindowAfterSave;
+var gForcedShutdown = false;
+var gSavedSendNowKey;
 var gContextMenu;
 var gLastFocusElement = null;
 var gLoadingComplete = false;
@@ -7965,6 +7967,12 @@ function SetComposeWindowTitle() {
  * @returns {boolean} true if the window can go ahead and close.
  */
 function ComposeCanClose() {
+  // A forced shutdown already flushed unsaved changes; prompting would block
+  // the quit with no user present to answer.
+  if (gForcedShutdown) {
+    return true;
+  }
+
   // No open compose window?
   if (!gMsgCompose) {
     return true;
@@ -8080,6 +8088,45 @@ function ComposeCanClose() {
   }
 
   return true;
+}
+
+/**
+ * Silently persist any unsaved changes as a draft, then close this window
+ * without prompting. Called on each open compose window by
+ * EnterpriseShutdown when an administrator-initiated shutdown is in progress
+ * and no user interaction is possible.
+ *
+ * @returns {Promise<void>} Resolves once the window has been closed.
+ */
+async function flushForForcedShutdown() {
+  const operationInProgress = () =>
+    gSendOperationInProgress ||
+    gSaveOperationInProgress ||
+    gAutoSavingInProgress;
+  const waitForIdle = async () => {
+    while (!window.closed && operationInProgress()) {
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+  };
+
+  await waitForIdle();
+  if (window.closed) {
+    return;
+  }
+  if (
+    gMsgCompose &&
+    (gContentChanged ||
+      gMsgCompose.bodyModified ||
+      gReceiptOptionChanged ||
+      gDSNOptionChanged)
+  ) {
+    await GenericSendMessage(Ci.nsIMsgCompDeliverMode.AutoSaveAsDraft);
+    await waitForIdle();
+  }
+  gForcedShutdown = true;
+  if (!window.closed) {
+    window.close();
+  }
 }
 
 function RemoveDraft() {

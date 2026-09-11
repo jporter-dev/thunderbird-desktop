@@ -9,4 +9,11 @@ with Files("**"):
 
 EXTRA_JS_MODULES.enterprise += [
     "EnterpriseHandler.sys.mjs",
+    "EnterpriseShutdown.sys.mjs",
+]
+
+XPCOM_MANIFESTS += ["components.conf"]
+
+BROWSER_CHROME_MANIFESTS += [
+    "tests/browser/browser.toml",
 ]
