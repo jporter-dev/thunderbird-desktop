@@ -14,11 +14,124 @@ ChromeUtils.defineLazyGetter(lazy, "localization", () => {
 ChromeUtils.defineESModuleGetters(lazy, {
   initiateShutdown:
     "resource://gre/modules/enterprise/EnterpriseCommon.sys.mjs",
+  RelaunchEnforcer:
+    "resource://gre/modules/enterprise/RelaunchEnforcer.sys.mjs",
 });
 
 const PROMPT_ON_SIGNOUT_PREF = "enterprise.prompt_on_signout";
 
+const RELAUNCH_NOTIFICATION_ID = "enterprise-relaunch";
+
+const relaunchUI = {
+  _notificationBoxes: new WeakMap(),
+
+  /**
+   * Shows or updates the relaunch warning in every ready mail window.
+   *
+   * @param {object} details
+   * @param {"warning"|"imminent"} details.phase - Warning severity.
+   * @param {number} details.restartAt - Restart deadline in epoch milliseconds.
+   * @param {number} details.minutes - Whole minutes remaining.
+   * @param {function(): void} details.restartNow - Requests the restart.
+   * @returns {Promise<boolean>} Whether at least one warning is visible.
+   */
+  async showOrUpdate({ phase, restartAt, minutes, restartNow }) {
+    let shown = false;
+    for (const win of Services.wm.getEnumerator("mail:3pane")) {
+      if (win.document.readyState !== "complete") {
+        continue;
+      }
+      try {
+        const box = this._getNotificationBox(win);
+        const label = {
+          "l10n-id":
+            phase === "imminent"
+              ? "enterprise-relaunch-imminent-message"
+              : "enterprise-relaunch-warning-message",
+          "l10n-args":
+            phase === "imminent" ? { minutes } : { datetime: restartAt },
+        };
+        const priority =
+          phase === "imminent"
+            ? box.PRIORITY_CRITICAL_HIGH
+            : box.PRIORITY_INFO_HIGH;
+        let notification = box.getNotificationWithValue(
+          RELAUNCH_NOTIFICATION_ID
+        );
+        if (notification) {
+          notification.label = label;
+          notification.priority = priority;
+          notification.setAttribute(
+            "type",
+            phase === "imminent" ? "critical" : "info"
+          );
+        } else {
+          notification = await box.appendNotification(
+            RELAUNCH_NOTIFICATION_ID,
+            { label, priority },
+            [
+              {
+                "l10n-id": "enterprise-relaunch-restart-now",
+                callback() {
+                  restartNow();
+                  return true;
+                },
+              },
+            ],
+            false,
+            false
+          );
+        }
+        shown = true;
+      } catch (error) {
+        console.error("EnterpriseHandler: relaunch warning failed:", error);
+      }
+    }
+    return shown;
+  },
+
+  hide() {
+    for (const win of Services.wm.getEnumerator("mail:3pane")) {
+      const box = this._notificationBoxes.get(win);
+      const notification = box?.getNotificationWithValue(
+        RELAUNCH_NOTIFICATION_ID
+      );
+      if (notification) {
+        box.removeNotification(notification, true);
+      }
+    }
+  },
+
+  isVisible() {
+    for (const win of Services.wm.getEnumerator("mail:3pane")) {
+      if (
+        this._notificationBoxes
+          .get(win)
+          ?.getNotificationWithValue(RELAUNCH_NOTIFICATION_ID)
+      ) {
+        return true;
+      }
+    }
+    return false;
+  },
+
+  _getNotificationBox(win) {
+    let box = this._notificationBoxes.get(win);
+    if (!box) {
+      box = new win.MozElements.NotificationBox(element => {
+        element.setAttribute("notificationside", "bottom");
+        win.document
+          .getElementById("messenger-notification-bottom")
+          .append(element);
+      });
+      this._notificationBoxes.set(win, box);
+    }
+    return box;
+  },
+};
+
 export const EnterpriseHandler = {
+  relaunchUI,
   /**
    * Shows the sign-out confirmation prompt, unless the user opted out of it.
    *
@@ -90,3 +203,8 @@ export const EnterpriseHandler = {
     lazy.initiateShutdown();
   },
 };
+
+/** The "enterprise-relaunch-warning-ui" entry point (see components.conf). */
+export function registerRelaunchWarningUI() {
+  lazy.RelaunchEnforcer.registerWarningUIDelegate(EnterpriseHandler.relaunchUI);
+}
